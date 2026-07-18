@@ -70,6 +70,13 @@ def clock_position(theta_deg):
     return 12 if hour == 0 else hour
 
 
+def convert_phase(angle_deg, is_lag):
+    """Mirrors a phase reading between lag and lead convention.
+    Applying it twice returns the original angle (it's its own inverse),
+    so the same function converts either direction."""
+    return (360 - angle_deg) % 360 if is_lag else angle_deg
+
+
 # ---------- reusable UI building blocks ----------
 class HeaderBar(BoxLayout):
     """Fixed blue app-bar at the top of the screen."""
@@ -173,10 +180,6 @@ class PolarChart(Widget):
         if R <= 0:
             return
 
-        # Scale is based ONLY on the vibration vectors (Original, Trial-run).
-        # Correction weight is a different physical quantity (mass, not
-        # vibration amplitude) so it is never scaled into this radius -
-        # it's drawn as a fixed-radius angle marker instead.
         mags = [1e-9]
         if self.original:
             mags.append(self.original["mag"])
@@ -281,7 +284,10 @@ class RotorView(Widget):
             font_size=dp(10),
             color=COLOR_TEXT_MUTED,
             size_hint=(None, None),
-            size=(dp(56), dp(16)),
+            size=(dp(70), dp(30)),
+            text_size=(dp(70), dp(30)),
+            halign="center",
+            valign="top",
             opacity=0,
             bold=True,
         )
@@ -290,7 +296,10 @@ class RotorView(Widget):
             font_size=dp(10),
             color=COLOR_SUCCESS,
             size_hint=(None, None),
-            size=(dp(80), dp(16)),
+            size=(dp(90), dp(30)),
+            text_size=(dp(90), dp(30)),
+            halign="center",
+            valign="top",
             opacity=0,
             bold=True,
         )
@@ -301,6 +310,8 @@ class RotorView(Widget):
     def set_weights(self, trial_angle, correction_angle):
         self.trial_angle = trial_angle
         self.correction_angle = correction_angle
+        self.trial_label.text = f"Trial\n{trial_angle:.1f}\u00b0"
+        self.correction_label.text = f"Correction\n{correction_angle:.1f}\u00b0"
         self._anim_angle = 0
         self._update_markers()
         Animation.cancel_all(self, "_anim_angle")
@@ -344,7 +355,7 @@ class RotorView(Widget):
                 tx = cx + R * math.sin(rad)
                 ty = cy + R * math.cos(rad)
                 Ellipse(pos=(tx - dp(7), ty - dp(7)), size=(dp(14), dp(14)))
-                self.trial_label.pos = (tx - dp(28), ty + dp(10))
+                self.trial_label.pos = (tx - dp(35), ty + dp(10))
                 self.trial_label.opacity = 1
 
             if self.correction_angle is not None:
@@ -353,7 +364,7 @@ class RotorView(Widget):
                 mx = cx + R * math.sin(rad)
                 my = cy + R * math.cos(rad)
                 Ellipse(pos=(mx - dp(8), my - dp(8)), size=(dp(16), dp(16)))
-                self.correction_label.pos = (mx - dp(40), my + dp(12))
+                self.correction_label.pos = (mx - dp(45), my + dp(12))
                 self.correction_label.opacity = 1
 
 
@@ -422,6 +433,58 @@ class BalanceApp(App):
         input_panel = Panel(size_hint_y=None)
         input_panel.bind(minimum_height=input_panel.setter("height"))
 
+        self.apply_conversion = False  # default: Phase Lag selected, angles used as-entered
+
+        convention_label = Label(
+            text="PHASE CONVENTION",
+            size_hint_y=None,
+            height=dp(20),
+            font_size=dp(12),
+            color=COLOR_TEXT_MUTED,
+            halign="left",
+            bold=True,
+        )
+        convention_label.bind(size=lambda inst, val: setattr(inst, "text_size", val))
+        input_panel.add_widget(convention_label)
+
+        convention_row = BoxLayout(
+            orientation="horizontal", size_hint_y=None, height=dp(44), spacing=dp(8)
+        )
+        self.lag_btn = Button(
+            text="Phase Lag",
+            background_normal="",
+            bold=True,
+            font_size=dp(14),
+        )
+        self.lead_btn = Button(
+            text="Phase Lead",
+            background_normal="",
+            bold=True,
+            font_size=dp(14),
+        )
+        self.lag_btn.bind(on_press=lambda inst: self.set_convention(False))
+        self.lead_btn.bind(on_press=lambda inst: self.set_convention(True))
+        convention_row.add_widget(self.lag_btn)
+        convention_row.add_widget(self.lead_btn)
+        input_panel.add_widget(convention_row)
+
+        convention_hint = Label(
+            text=(
+                f"[color={MUTED_HEX}][size=11]Lag: phase measured opposite to shaft rotation "
+                "(most instruments' default) \u00b7 Lead: measured in the direction of "
+                "rotation.[/size][/color]"
+            ),
+            markup=True,
+            size_hint_y=None,
+            height=dp(44),
+            halign="left",
+            valign="top",
+        )
+        convention_hint.bind(size=lambda inst, val: setattr(inst, "text_size", val))
+        input_panel.add_widget(convention_hint)
+
+        self._update_convention_buttons()
+
         self.o_amp = LabeledInput("ORIGINAL VIBRATION AMPLITUDE", "e.g. 4.2")
         self.o_phase = LabeledInput("ORIGINAL PHASE ANGLE (deg)", "e.g. 48")
         self.t_wt = LabeledInput("TRIAL WEIGHT MASS", "e.g. 5.0")
@@ -473,6 +536,16 @@ class BalanceApp(App):
         chart_title.bind(size=lambda inst, val: setattr(inst, "text_size", val))
         chart_panel.add_widget(chart_title)
 
+        chart_note = Label(
+            text=f"[color={MUTED_HEX}][size=11]Angles below are shown after phase-convention conversion.[/size][/color]",
+            markup=True,
+            size_hint_y=None,
+            height=dp(18),
+            halign="left",
+        )
+        chart_note.bind(size=lambda inst, val: setattr(inst, "text_size", val))
+        chart_panel.add_widget(chart_note)
+
         self.polar_chart = PolarChart(size_hint_y=None, height=dp(280))
         chart_panel.add_widget(self.polar_chart)
 
@@ -523,6 +596,23 @@ class BalanceApp(App):
         root.add_widget(scroll)
         return root
 
+    def set_convention(self, apply_conversion):
+        self.apply_conversion = apply_conversion
+        self._update_convention_buttons()
+        self.compute(None)
+
+    def _update_convention_buttons(self):
+        if self.apply_conversion:
+            self.lead_btn.background_color = COLOR_PRIMARY
+            self.lead_btn.color = (1, 1, 1, 1)
+            self.lag_btn.background_color = COLOR_PANEL_BG
+            self.lag_btn.color = COLOR_TEXT
+        else:
+            self.lag_btn.background_color = COLOR_PRIMARY
+            self.lag_btn.color = (1, 1, 1, 1)
+            self.lead_btn.background_color = COLOR_PANEL_BG
+            self.lead_btn.color = COLOR_TEXT
+
     def compute(self, instance):
         vals = [
             self.o_amp.value,
@@ -541,8 +631,11 @@ class BalanceApp(App):
             self.result_label.text = f"[color={ERROR_HEX}]Trial weight must be greater than zero.[/color]"
             return
 
-        O = to_complex(o_amp, o_phase)
-        OT = to_complex(tr_amp, tr_phase)
+        o_phase_i = convert_phase(o_phase, self.apply_conversion)
+        tr_phase_i = convert_phase(tr_phase, self.apply_conversion)
+
+        O = to_complex(o_amp, o_phase_i)
+        OT = to_complex(tr_amp, tr_phase_i)
         T = to_complex(t_wt, t_angle)
         E = OT - O
 
@@ -573,15 +666,15 @@ class BalanceApp(App):
         )
 
         self.polar_chart.set_data(
-            original={"mag": o_amp, "angle": o_phase, "color": ORIGINAL_COLOR},
-            trial_run={"mag": tr_amp, "angle": tr_phase, "color": RESULTANT_COLOR},
+            original={"mag": o_amp, "angle": o_phase_i, "color": ORIGINAL_COLOR},
+            trial_run={"mag": tr_amp, "angle": tr_phase_i, "color": RESULTANT_COLOR},
             correction_angle=wc_ang,
             correction_color=COLOR_SUCCESS[:3],
         )
         self.chart_legend.text = "\n\n".join(
             [
-                f"[color={ORIGINAL_HEX}]\u25CF  Original: {o_amp:.2f} @ {o_phase:.1f}\u00b0[/color]",
-                f"[color={RESULTANT_HEX}]\u25CF  Trial run (O+T): {tr_amp:.2f} @ {tr_phase:.1f}\u00b0[/color]",
+                f"[color={ORIGINAL_HEX}]\u25CF  Original: {o_amp:.2f} @ {o_phase_i:.1f}\u00b0[/color]",
+                f"[color={RESULTANT_HEX}]\u25CF  Trial run (O+T): {tr_amp:.2f} @ {tr_phase_i:.1f}\u00b0[/color]",
                 f"[color={EFFECT_HEX}]\u25CF  Effect of trial weight: {e_mag:.2f} @ {e_ang:.1f}\u00b0[/color]",
                 f"[color={SUCCESS_HEX}]\u25CF  Correction weight: {wc_mag:.2f} @ {wc_ang:.1f}\u00b0[/color]",
             ]
