@@ -141,22 +141,25 @@ class Panel(BoxLayout):
 class PolarChart(Widget):
     """Draws the classic balancing vector triangle: Original and
     Trial-run vectors from the center, with the Effect vector drawn
-    tip-to-tip between them (since Effect = Trial-run - Original),
-    plus the Correction vector from the center. Numeric values are
-    NOT drawn on the chart itself (that caused clutter) - they go in
-    a separate legend below, set via the app's chart_legend label."""
+    tip-to-tip between them (since Effect = Trial-run - Original).
+    Correction weight is drawn as a fixed-radius angle marker only,
+    since it's a different physical quantity (mass) and can't share
+    a magnitude scale with the vibration vectors."""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.original = None
         self.trial_run = None
-        self.correction = None
+        self.correction_angle = None
+        self.correction_color = (0.082, 0.502, 0.235)
         self.bind(pos=self.redraw, size=self.redraw)
 
-    def set_data(self, original, trial_run, correction):
+    def set_data(self, original, trial_run, correction_angle=None, correction_color=None):
         self.original = original
         self.trial_run = trial_run
-        self.correction = correction
+        self.correction_angle = correction_angle
+        if correction_color is not None:
+            self.correction_color = correction_color
         self.redraw()
 
     def redraw(self, *args):
@@ -170,14 +173,16 @@ class PolarChart(Widget):
         if R <= 0:
             return
 
+        # Scale is based ONLY on the vibration vectors (Original, Trial-run).
+        # Correction weight is a different physical quantity (mass, not
+        # vibration amplitude) so it is never scaled into this radius -
+        # it's drawn as a fixed-radius angle marker instead.
         mags = [1e-9]
         if self.original:
             mags.append(self.original["mag"])
         if self.trial_run:
             mags.append(self.trial_run["mag"])
-        if self.correction:
-            mags.append(self.correction["mag"])
-        scale = R / max(mags)  # auto-zoom to fit all vectors
+        scale = R / max(mags)  # auto-zoom to fit the vibration vectors
 
         with self.canvas:
             # grid rings
@@ -192,15 +197,21 @@ class PolarChart(Widget):
                 y2 = cy + R * math.cos(rad)
                 Line(points=[cx, cy, x2, y2], width=1)
 
-            if self.original and self.trial_run and self.correction:
+            if self.original and self.trial_run:
                 ox, oy = self._point(cx, cy, scale, self.original)
                 tx, ty = self._point(cx, cy, scale, self.trial_run)
-                wx, wy = self._point(cx, cy, scale, self.correction)
 
                 self._draw_arrow(cx, cy, ox, oy, self.original["color"])
                 self._draw_arrow(cx, cy, tx, ty, self.trial_run["color"])
                 self._draw_arrow(ox, oy, tx, ty, EFFECT_COLOR)
-                self._draw_arrow(cx, cy, wx, wy, self.correction["color"])
+
+            if self.correction_angle is not None:
+                r, g, b = self.correction_color
+                Color(r, g, b, 1)
+                rad = math.radians(self.correction_angle)
+                mx = cx + R * math.sin(rad)
+                my = cy + R * math.cos(rad)
+                Ellipse(pos=(mx - dp(8), my - dp(8)), size=(dp(16), dp(16)))
 
             # center point
             Color(*COLOR_TEXT)
@@ -496,6 +507,18 @@ class BalanceApp(App):
         rotor_panel.add_widget(self.rotor_view)
         form.add_widget(rotor_panel)
 
+        footer = Label(
+            text=f"[color={MUTED_HEX}]Created by Gnaneswar[/color]",
+            markup=True,
+            size_hint_y=None,
+            height=dp(40),
+            halign="center",
+            valign="middle",
+            font_size=dp(12),
+        )
+        footer.bind(size=lambda inst, val: setattr(inst, "text_size", val))
+        form.add_widget(footer)
+
         scroll.add_widget(form)
         root.add_widget(scroll)
         return root
@@ -552,7 +575,8 @@ class BalanceApp(App):
         self.polar_chart.set_data(
             original={"mag": o_amp, "angle": o_phase, "color": ORIGINAL_COLOR},
             trial_run={"mag": tr_amp, "angle": tr_phase, "color": RESULTANT_COLOR},
-            correction={"mag": wc_mag, "angle": wc_ang, "color": COLOR_SUCCESS[:3]},
+            correction_angle=wc_ang,
+            correction_color=COLOR_SUCCESS[:3],
         )
         self.chart_legend.text = "\n\n".join(
             [
